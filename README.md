@@ -1,62 +1,94 @@
 # dsh-image-preview
 
-dsh（DeepSeek Harness）会话区图片预览插件：当模型执行 `read_image` 工具时，会话界面默认以小图缩略展示图片，点击后以与 dsh 自带 `ImageLightbox` 一致的样式全屏查看原图。
+> [中文版](./README.zh.md)
 
-## 功能
+**Image preview for the dsh session interface.** When the agent runs the `read_image` tool, the result is rendered as a **small thumbnail** by default instead of raw JSON — click the thumbnail to view the **full-size original** in a lightbox styled exactly like dsh's built-in `ImageLightbox`.
 
-- **默认小图**：`read_image` 结果以 240px 圆角缩略图展示，不撑爆会话流。
-- **点击看大图**：点击缩略图弹出原图预览（`Esc` / 点击遮罩 / 关闭按钮均可关闭，关闭后焦点还原到触发元素）。
-- **复用自带图片通路**：图片字节经宿主端 `session.attachment` RPC 授权加载，与 dsh 自带 `resolveImage` 同一条通路。
-- **状态完整**：运行中（`row.running`）、失败（可点击重试 `image.loadFailed`）、加载中（`image.loading`）都有对应展示。
-- **主题自适应**：颜色全部引用 dsh 主题 token（`--dsw-*`），随 `data-ds-dark-theme` 自动明暗。
+## Features
 
-## 工作原理
+| | |
+| --- | --- |
+| 🖼️ **Thumbnail by default** | `read_image` results render as a rounded ~240px thumbnail that never blows up the conversation flow |
+| 🔍 **Click for full size** | Click the thumbnail to open the original image in a lightbox — dismiss with `Esc`, clicking the backdrop, or the close button; focus is restored to the trigger on close |
+| 🔐 **Reuses the built-in image pipeline** | Image bytes are fetched through the host's `session.attachment` RPC with authorization — the exact same path dsh's own `resolveImage` uses |
+| ⏱️ **Complete states** | Running (`row.running`), failed with retry (`image.loadFailed`), and loading (`image.loading`) states are all covered |
+| 🌗 **Theme aware** | All colors reference dsh theme tokens (`--dsw-*`), so the preview follows the light/dark theme automatically |
 
-插件是纯浏览器端 client 插件，注册 `tool.call.toolview` 的 keyed slot（`key: "read_image"`），接管 `read_image` 工具行的渲染：
+## How it works
+
+`dsh-image-preview` is a **pure client-side plugin**. It registers a keyed slot on `tool.call.toolview` with key `read_image` and takes over rendering of the `read_image` tool row:
 
 ```
-模型执行 read_image
-  └─ 工具结果 content: [{ text 信封 }, { type: "image", attachment }]
-       └─ tool-call 节点 → ToolCallTree → tool.call.toolview (key=read_image)
-            └─ ReadImageRow：小图缩略图 + 点击 ImageLightbox 原图预览
+agent runs read_image
+  └─ tool result content: [{ text envelope }, { type: "image", attachment }]
+       └─ tool-call node → tool.call.toolview (key = read_image)
+            └─ ReadImageRow: thumbnail + click to open ImageLightbox
 ```
 
-`sessionId` 由会话级 slot 的 standard kit 注入；附件引用（`attachmentId` / `mediaType` / `width` / `height`）取自工具结果块。
+- `sessionId` is injected by the session-scoped slot's standard kit.
+- Attachment metadata (`attachmentId`, `mediaType`, `width`, `height`) comes straight from the tool result block.
+- The lightbox (`ImageLightbox`) is a clone of dsh's built-in behavior: portal to `body`, backdrop mask, ESC/backdrop/close dismissal, focus restore.
 
-## 安装
+## Installation
 
-在 dsh web profile（如 `~/.dsh/profiles/web`）中：
+### From GitHub (recommended)
 
-1. `package.json` 添加依赖：
+Requires pnpm ≥ 9. Install into your web profile with the official plugin command:
 
-   ```json
-   "@alger-ai/dsh-image-preview": "link:/path/to/dsh-image-preview"
-   ```
-
-2. `dsh.profile.bundles` 列表追加：
-
-   ```json
-   "@alger-ai/dsh-image-preview"
-   ```
-
-3. `pnpm install` 后重启 `dsh web` 并刷新页面。
-
-## 本地自检
-
-```bash
-node verify.mjs
+```sh
+dsh plugin --profile web add 'github:algerkong/dsh-image-preview'
 ```
 
-## 文件结构
+or manually in `~/.dsh/profiles/web/package.json`:
+
+```json
+{
+  "dependencies": {
+    "@alger-ai/dsh-image-preview": "github:algerkong/dsh-image-preview"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ "@alger-ai/dsh-image-preview" ]
+    }
+  }
+}
+```
+
+Then run `pnpm install` in the profile and **restart `dsh web`**. Refresh the page afterwards.
+
+### Local development
+
+Link the package directly:
+
+```sh
+cd ~/.dsh/profiles/web
+pnpm add link:/path/to/dsh-image-preview
+```
+
+Add `"@alger-ai/dsh-image-preview"` to `dsh.profile.bundles`, restart `dsh web`, and refresh.
+
+## Usage
+
+1. Start a session and let the agent call `read_image` on an image file.
+2. The tool row shows a small thumbnail instead of raw JSON.
+3. Click the thumbnail to inspect the full-size original in the lightbox.
+
+## Development
+
+```sh
+node verify.mjs   # self-check: bundle shape, slot registration, block parsing
+```
+
+## Files
 
 ```
 dsh-image-preview/
-├── package.json        # bundle 声明（dsh.bundle.patch / dsh.client platform=web）
-├── cordis.patch.yml    # 注册 client 入口（id: ui-image-preview）
+├── package.json        # bundle metadata (dsh.bundle.patch / dsh.client platform=web)
+├── cordis.patch.yml    # registers the client entry (id: ui-image-preview)
 ├── lib/
-│   ├── index.js        # 宿主端空入口（浏览器端插件）
-│   └── client.js       # 浏览器端：read_image toolview + 缩略图 + 原图预览
-└── verify.mjs          # 自检脚本
+│   ├── index.js        # host-side entry (empty — browser-only plugin)
+│   └── client.js       # browser: read_image toolview + thumbnail + lightbox
+└── verify.mjs          # self-check script
 ```
 
 ## License

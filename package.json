@@ -1,6 +1,6 @@
 {
   "name": "@alger-ai/dsh-image-preview",
-  "description": "dsh 会话区图片预览：read_image 工具结果默认以小图缩略展示，点击用自带 ImageLightbox 全屏查看大图",
+  "description": "Image preview in the dsh session: read_image tool results render as a small thumbnail by default and open full-size in the built-in lightbox on click",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -23,5 +23,9 @@
     "build": "node verify.mjs",
     "test": "node verify.mjs"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "react": ">=18"
+  }
 }
