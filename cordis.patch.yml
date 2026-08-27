@@ -1,0 +1,5 @@
+# dsh-image-preview bundle patch: registers the public dsh.client entry into the
+# web plugin roster so the image-preview toolview is loaded in the browser.
+- insert:
+    - id: ui-image-preview
+      name: '@alger-ai/dsh-image-preview'
