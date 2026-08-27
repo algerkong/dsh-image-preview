@@ -14,6 +14,16 @@
 | ⏱️ **Complete states** | Running (`row.running`), failed with retry (`image.loadFailed`), and loading (`image.loading`) states are all covered |
 | 🌗 **Theme aware** | All colors reference dsh theme tokens (`--dsw-*`), so the preview follows the light/dark theme automatically |
 
+## Preview
+
+**Thumbnails in the session** — each `read_image` tool row renders a small thumbnail by default:
+
+![Thumbnail previews in the session](docs/screenshot-preview.png)
+
+**Full-size lightbox** — click any thumbnail to open the original image. Supports ← → navigation across all images in the conversation (counter shows `3 / 4`):
+
+![Lightbox with cross-row navigation](docs/screenshot-lightbox.png)
+
 ## How it works
 
 `dsh-image-preview` is a **pure client-side plugin**. It registers a keyed slot on `tool.call.toolview` with key `read_image` and takes over rendering of the `read_image` tool row:

@@ -14,6 +14,16 @@
 | ⏱️ **状态完整** | 运行中（`row.running`）、失败（可点击重试 `image.loadFailed`）、加载中（`image.loading`）都有对应展示 |
 | 🌗 **主题自适应** | 颜色全部引用 dsh 主题 token（`--dsw-*`），随 light/dark 主题自动切换 |
 
+## 效果预览
+
+**会话中的缩略图** — 每个 `read_image` 工具行默认显示小缩略图：
+
+![会话中的缩略图预览](docs/screenshot-preview.png)
+
+**大图 Lightbox** — 点击任意缩略图打开原图，支持 ← → 按钮或键盘左右箭头在对话中所有图片间跨行切换（底部计数器显示 `3 / 4`）：
+
+![Lightbox 跨行导航](docs/screenshot-lightbox.png)
+
 ## 工作原理
 
 本插件是**纯浏览器端 client 插件**，注册 `tool.call.toolview` 的 keyed slot（`key: "read_image"`），接管 `read_image` 工具行的渲染：
