@@ -1,7 +1,7 @@
 {
   "name": "@alger-ai/dsh-image-preview",
   "description": "Image preview in the dsh session: read_image tool results render as a small thumbnail by default and open full-size in the built-in lightbox on click",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
