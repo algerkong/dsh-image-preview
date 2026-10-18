@@ -7,14 +7,19 @@
  *        官方 read_image 已在默认 priority 注册时，插件必须以更低 priority 才能接管，
  *        否则 apply() 抛 “already has an entry for key ... at priority 0”。
  *      这正是本插件此前在 dsh 0.1.5-rc.2 上彻底不渲染的根因。
+ *      dsh 0.2.x 的官方条目还会声明 tool.call.images 子 slot；插件接管整行但
+ *      不声明 children，避免与官方声明冲突。
  *   3) 运行时渲染契约 —— 用真实 react + 自带的极简 reconciler 递归展开函数组件，断言：
  *        - 不再自己 fetch /api/session.attachment（改用注入的 loadImage）
  *        - 经 loadImage 取图并渲染缩略图
  *        - 点击缩略图打开 Lightbox，Esc 可关闭
  *        - 多图走网格 + 左右导航 + 计数器，且 registry 按 sessionId 隔离
+ *        - 最终输出 image block、Markdown 图片、present 交付图片都能接管
+ *        - 交付图片的三处文件操作走 Session Remote / sidebarRight
  */
 import assert from "node:assert";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -40,17 +45,44 @@ assert.ok(Array.isArray(duckPlugin.inject) && duckPlugin.inject.includes("slots"
 console.log(`✅ 1/3 自注册契约通过 (id=${spec.id}, inject=${JSON.stringify(duckPlugin.inject)})`);
 
 // ── 2) slot 注册契约：必须用更低 priority 接管官方 read_image ────────────
-// 最小复刻件，精确对齐 dsh 0.1.5-rc.2 slot registry 的 keyed 分支语义。
+// 最小复刻件，对齐 dsh 0.2.1-rc.2 slot registry 的 keyed 分支与 children 声明语义。
 class KeyedSlotRegistry {
-  constructor() { this.entries = []; }
+  constructor() {
+    this.entries = [];
+    // "root" 由 SlotCore 内建；tool.call.toolview 由 ToolCallTree 的 children 声明；
+    // conversation.chat.message.images 由 chat 的 assistant-step 声明。
+    this.declared = new Map([
+      ["root", "(built-in)"],
+      ["tool.call.toolview", "root"],
+      ["conversation.chat.message.images", "assistant-step"],
+      ["conversation.chat.user.images", "user-content"],
+    ]);
+  }
+  declare(name, by) {
+    if (this.declared.has(name)) {
+      throw new Error(`slot "${name}" is already declared (by ${this.declared.get(name)})`);
+    }
+    this.declared.set(name, by);
+  }
   register(options) {
+    if (!this.declared.has(options.name)) {
+      throw new Error(`slot "${options.name}" is not declared (a parent entry's children table must declare it)`);
+    }
     const priority = options.priority ?? 0;
-    const clash = this.entries.find((e) => e.options.key === options.key && (e.options.priority ?? 0) === priority);
+    const clash = this.entries.find((e) =>
+      e.options.name === options.name &&
+      e.options.key === options.key &&
+      (e.options.priority ?? 0) === priority
+    );
     if (clash !== undefined) {
       throw new Error(
-        `keyed slot "tool.call.toolview" already has an entry for key "${options.key}" ` +
+        `keyed slot "${options.name}" already has an entry for key "${options.key}" ` +
         `at priority ${priority} — register at a different priority to shadow it (lowest renders)`,
       );
+    }
+    // 子 slot 声明发生在条目注册时，且跨条目全局唯一（0.2.x 语义）。
+    for (const child of Object.keys(options.children ?? {})) {
+      this.declare(child, `an entry in "${options.name}"`);
     }
     const entry = { options };
     this.entries = [...this.entries, entry].sort((a, b) => (a.options.priority ?? 0) - (b.options.priority ?? 0));
@@ -61,8 +93,14 @@ class KeyedSlotRegistry {
 }
 
 const registry = new KeyedSlotRegistry();
-// 官方 dsh 自带的 read_image toolview 已以默认 priority 注册
-registry.register({ name: "tool.call.toolview", key: "read_image", locale: "conversation" });
+// 官方 dsh 自带的 read_image toolview 已以默认 priority 注册；0.2.x 起它还声明
+// tool.call.images 子 slot，由 ui-attachment 的 MessageImages 填充。
+registry.register({
+  name: "tool.call.toolview",
+  key: "read_image",
+  locale: "conversation",
+  children: { "tool.call.images": { kind: "single", scope: "session" } },
+});
 
 const captured = [];
 duckPlugin.apply({
@@ -74,10 +112,14 @@ duckPlugin.apply({
     },
   },
 });
-assert.equal(captured.length, 1, "apply() 必须注册恰好一个 toolview（不得抛 priority 冲突）");
+assert.equal(captured.length, 3, "apply() 必须注册 toolview、最终输出图片、用户图片三个 slot 接管项");
 
-const reg = captured[0].options;
-assert.equal(reg.name, "tool.call.toolview", "必须注册 tool.call.toolview");
+const reg = captured.find((entry) => entry.options.name === "tool.call.toolview")?.options;
+const messageReg = captured.find((entry) => entry.options.name === "conversation.chat.message.images")?.options;
+const userReg = captured.find((entry) => entry.options.name === "conversation.chat.user.images")?.options;
+assert.ok(reg !== undefined, "必须注册 tool.call.toolview");
+assert.ok(messageReg !== undefined, "必须注册 conversation.chat.message.images");
+assert.ok(userReg !== undefined, "必须注册 conversation.chat.user.images");
 assert.equal(reg.key, "read_image", "必须接管 read_image key");
 assert.equal(reg.locale, "conversation", "必须声明 conversation locale");
 assert.ok(
@@ -85,8 +127,22 @@ assert.ok(
   `接管官方 read_image 必须使用更低的 priority（< 0），当前=${String(reg.priority)}；` +
   "否则 keyed slot 同 key 同 priority 会抛错",
 );
+assert.equal(reg.children, undefined, "插件接管整行即可，不应重复声明官方已有的 tool.call.images 子 slot");
+assert.ok(registry.declared.has("tool.call.images"), "官方声明过的 tool.call.images 不应因插件接管而消失");
 assert.equal(registry.renderKey("read_image").options.priority, reg.priority, "插件的低 priority 条目应被选中渲染");
-console.log(`✅ 2/3 slot 接管契约通过 (priority=${reg.priority} < 官方 0，可 shadow 官方 read_image)`);
+
+assert.equal(messageReg.locale, "conversation", "最终输出图片 slot 也必须声明 conversation locale");
+assert.ok(
+  typeof messageReg.priority === "number" && messageReg.priority < 100,
+  `接管官方 MessageImages（priority 100）必须使用更低的 priority，当前=${String(messageReg.priority)}`,
+);
+assert.equal(userReg.locale, "conversation", "用户图片 slot 也必须声明 conversation locale");
+assert.ok(
+  typeof userReg.priority === "number" && userReg.priority < 100,
+  `接管官方用户 MessageImages（priority 100）必须使用更低的 priority，当前=${String(userReg.priority)}`,
+);
+assert.equal(registry.entries.find((entry) => entry.options.name === "conversation.chat.message.images")?.options.priority, messageReg.priority, "最终输出图片接管条目应被注册");
+console.log(`✅ 2/3 slot 接管契约通过 (read_image priority=${reg.priority} < 0；message.images priority=${messageReg.priority} < 100；user.images priority=${userReg.priority} < 100)`);
 
 // ── 3) 运行时渲染契约 ──────────────────────────────────────────────────
 // 只看代码不看注释：剥掉块注释与行注释后再断言，避免文档提及旧实现导致误判。
@@ -105,16 +161,41 @@ assert.ok(/"read_image"/.test(code), "必须声明 read_image key");
 assert.ok(/createPortal/.test(code), "Lightbox 应 portal 到 body");
 assert.ok(/Escape/.test(code), "Lightbox 应支持 Esc 关闭");
 
-// 真实 react（web profile 内已安装）。react-dom 不在 profile 中，故 createPortal 做桩，
-// 并用自带的极简 reconciler 递归展开函数组件（含正确的 per-component hook 作用域）。
+// 真实 react：优先仓库 devDependency（pnpm install 后可用），其次环境变量指定的
+// DSH profile。react-dom 不在运行时依赖里，故 createPortal 做桩，并用自带的
+// 极简 reconciler 递归展开函数组件（含正确的 per-component hook 作用域）。
+function resolveReactEntry() {
+  const candidates = [
+    process.env.DSH_REACT_PATH,
+    path.join(root, "node_modules/react/index.js"),
+    process.env.DSH_PROFILE === undefined
+      ? undefined
+      : path.join(process.env.DSH_PROFILE, "node_modules/react/index.js"),
+    path.join(os.homedir(), ".dsh/profiles/web/node_modules/react/index.js"),
+    path.join(os.homedir(), ".dsh/profiles/desktop/node_modules/react/index.js"),
+  ].filter((candidate) => typeof candidate === "string" && candidate !== "");
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+const reactEntry = resolveReactEntry();
+if (reactEntry === undefined) {
+  const message =
+    "找不到 react。先在仓库执行 `pnpm install`（或设置 DSH_REACT_PATH 指向 react/index.js）；" +
+    "若只想跑前两层，可设置 DSH_VERIFY_ALLOW_SKIP=1。";
+  if (process.env.DSH_VERIFY_ALLOW_SKIP === "1") {
+    console.log(`⚠️  3/3 跳过真实渲染断言（${message}）`);
+    console.log("\n✅ dsh-image-preview self-check passed (2/3，渲染层被显式跳过)");
+    process.exit(0);
+  }
+  throw new Error(message);
+}
+
 let React;
 try {
-  React = (await import(pathToFileURL("/root/.dsh/profiles/web/node_modules/react/index.js").href)).default;
-  assert.equal(typeof React.createElement, "function");
+  React = (await import(pathToFileURL(reactEntry).href)).default;
+  assert.equal(typeof React.createElement, "function", `react 入口不可用：${reactEntry}`);
 } catch (error) {
-  console.log(`⚠️  3/3 跳过真实渲染断言（找不到 react 运行环境：${error.message}）`);
-  console.log("\n✅ dsh-image-preview self-check passed (2/3，渲染层需在有 react 的环境运行)");
-  process.exit(0);
+  throw new Error(`无法加载 React（${reactEntry}）：${error.message}`);
 }
 
 // ── 极简 reconciler：递归展开函数组件，per-component hook 作用域 ──────────
@@ -230,6 +311,10 @@ const makeEl = (tag) => ({
   querySelector() { return null; },
 });
 const listeners = {};
+const docListeners = {};
+const markdownButtons = [];
+const presentedCards = [];
+globalThis.Element = class Element {};
 const win = {
   addEventListener(type, fn) { (listeners[type] ??= []).push(fn); },
   removeEventListener(type, fn) { listeners[type] = (listeners[type] ?? []).filter((x) => x !== fn); },
@@ -244,6 +329,7 @@ globalThis.window = win;
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.document = {
   body: makeEl("body"), head: makeEl("head"), activeElement: null,
+  baseURI: "http://localhost/",
   createElement: (tag) => {
     const el = makeEl(tag);
     // 记录 <a download> 触发的下载，用于验证“下载”按钮
@@ -251,6 +337,11 @@ globalThis.document = {
     return el;
   },
   querySelector: () => null,
+  querySelectorAll: (selector) => selector === "[data-presented-file]"
+    ? presentedCards
+    : selector.includes('[data-chat-flow-kind="assistant-step"]') ? markdownButtons : [],
+  addEventListener(type, fn) { (docListeners[type] ??= []).push(fn); },
+  removeEventListener(type, fn) { docListeners[type] = (docListeners[type] ?? []).filter((x) => x !== fn); },
 };
 /** 捕获由插件触发的下载（<a download> click）。 */
 const downloads = [];
@@ -263,15 +354,30 @@ const testReact = {
   useMemo: rt.useMemo, useEffect: rt.useEffect,
 };
 
-let registered;
+const registeredEntries = [];
+const openRequests = [];
+const sidebarAddresses = [];
+let standaloneRender = null;
+const reactDomTest = {
+  createPortal: (node) => node,
+  render: (element, host) => { standaloneRender = { element, host }; },
+  unmountComponentAtNode: () => { standaloneRender = null; },
+};
 spec.factory((id) => {
   if (id === "react") return testReact;
-  if (id === "react-dom") return { createPortal: (node) => node };
+  if (id === "react-dom") return reactDomTest;
   throw new Error(`unexpected require: ${id}`);
 }).apply({
-  slots: { inject: (_n, cb) => cb(), register: (options, component) => { registered = { options, component }; } },
+  slots: { inject: (_n, cb) => cb(), register: (options, component) => { registeredEntries.push({ options, component }); } },
+  sessions: { list: { getSnapshot: () => ({ byId: { "session-ui": { cwd: "/tmp", retainedBy: { mainView: 1 } } } }) } },
+  remote: { session: {
+    openWorkspacePath: (request) => { openRequests.push(request); return Promise.resolve({ ok: true }); },
+    workspacePathApplications: () => Promise.resolve({ ok: true, value: [{ id: "preview", name: "Preview", default: true, icon: null }] }),
+  } },
+  sidebarRight: { openResource: (address) => { sidebarAddresses.push(address); } },
 });
-const ReadImageRow = registered.component;
+const ReadImageRow = registeredEntries.find((entry) => entry.options.name === "tool.call.toolview").component;
+const MessageImagesRow = registeredEntries.find((entry) => entry.options.name === "conversation.chat.message.images").component;
 
 const FIND = (node, pred, out = []) => {
   if (Array.isArray(node)) { node.forEach((n) => FIND(n, pred, out)); return out; }
@@ -490,5 +596,138 @@ for (const deg of [90, 180, 270, -90, -180, -270, 45, 200]) {
   assert.ok(step <= 180, `${deg}° 的复位步长应 ≤180°，实际=${step}°`);
 }
 console.log("✅ 3/3d 旋转回归通过（角度持续累加不取模；复位走最短路径 ≤180°，无整圈回绕）");
+
+// ── 3e) 最终输出正文图片：接管 conversation.chat.message.images ─────────
+// 助手最终回复里的 image block 走的是 assistant-step 的 message.images slot，
+// 不是 read_image 的 toolview；这里验证同一套 registry / Lightbox 已接上。
+const SESSION_FINAL = "session-final-output";
+const finalProps = {
+  images: [{ attachment: att("final-1", "final.png") }],
+  loadImage, align: "start", sessionId: SESSION_FINAL, t,
+};
+const beforeFinal = loadCalls;
+let ftree = await runtime.render(MessageImagesRow, finalProps);
+assert.equal(loadCalls, beforeFinal + 1, "最终输出图片应通过注入的 loadImage 加载一次");
+assert.equal(FIND(ftree, (n) => cls(n, "dip-message-images")).length, 1, "应渲染最终输出图片容器");
+assert.equal(FIND(ftree, (n) => cls(n, "dip-gallery--single")).length, 1, "单图应使用 single 布局");
+const finalFrames = FIND(ftree, (n) => cls(n, "dip-frame"));
+assert.equal(finalFrames.length, 1, "单图应渲染 1 个缩略图");
+const finalImg = FIND(ftree, (n) => n.type === "img")[0];
+assert.ok(finalImg !== undefined && /blob:fake\/final-1/.test(String(finalImg.props.src)), "最终输出缩略图 src 应来自 loadImage");
+finalFrames[0].props.onClick();
+ftree = await runtime.render(MessageImagesRow, finalProps);
+assert.equal(FIND(ftree, (n) => cls(n, "dip-backdrop")).length, 1, "点击最终输出缩略图应打开 Lightbox");
+win.fire("keydown", { key: "Escape" });
+ftree = await runtime.render(MessageImagesRow, finalProps);
+assert.equal(FIND(ftree, (n) => cls(n, "dip-backdrop")).length, 0, "Esc 应关闭最终输出 Lightbox");
+
+const finalMultiProps = {
+  images: [
+    { attachment: att("final-a", "a.png") },
+    { attachment: att("final-b", "b.png") },
+  ],
+  loadImage, align: "start", sessionId: SESSION_FINAL, t,
+};
+ftree = await runtime.render(MessageImagesRow, finalMultiProps);
+assert.equal(FIND(ftree, (n) => cls(n, "dip-gallery")).length, 1, "最终输出多图应使用 dip-gallery 网格");
+assert.equal(FIND(ftree, (n) => cls(n, "dip-gallery--single")).length, 0, "多图不应使用 single 布局");
+const finalMultiFrames = FIND(ftree, (n) => cls(n, "dip-frame"));
+assert.equal(finalMultiFrames.length, 2, "最终输出多图应渲染 2 个缩略图");
+finalMultiFrames[0].props.onClick();
+ftree = await runtime.render(MessageImagesRow, finalMultiProps);
+const finalNavs = FIND(ftree, (n) => cls(n, "dip-nav"));
+assert.equal(finalNavs.length, 2, "最终输出多图 Lightbox 应有左右导航");
+const finalCounter = FIND(ftree, (n) => cls(n, "dip-counter"))[0];
+assert.equal(String(finalCounter.props.children), "1 / 2", "最终输出多图计数器应为 1 / 2");
+finalNavs.find((n) => cls(n, "dip-nav--next")).props.onClick();
+ftree = await runtime.render(MessageImagesRow, finalMultiProps);
+const finalCounter2 = FIND(ftree, (n) => cls(n, "dip-counter"))[0];
+assert.equal(String(finalCounter2.props.children), "2 / 2", "点击 next 应切到 2 / 2");
+const finalShown = FIND(ftree, (n) => cls(n, "dip-image"))[0];
+assert.ok(/blob:fake\/final-b/.test(String(finalShown.props.src)), "第 2 张应显示 final-b");
+console.log("✅ 3/3e 最终输出图片通过（message.images 接管 + 单图/多图 + Lightbox + 导航）");
+
+// ── 3f) 最终输出 Markdown 图片：捕获阶段接管官方按钮 ─────────────────────
+// MarkdownText 的图片按钮不是 slot；插件在 document 捕获阶段拦截，并用独立
+// React root 挂载自己的 Lightbox。这里用假 DOM 验证拦截、挂载与关闭。
+const mdImg = {
+  currentSrc: "blob:fake/md.png",
+  src: "blob:fake/md.png",
+  alt: "chart.png",
+  parentElement: null,
+};
+const mdButton = {
+  closest(selector) {
+    if (selector === "[data-dsh-image-preview]") return null;
+    if (selector === '[data-chat-flow-kind="assistant-step"]') return {};
+    return null;
+  },
+  querySelector(selector) { return selector === ":scope > img" ? mdImg : null; },
+};
+mdImg.parentElement = mdButton;
+markdownButtons.push(mdButton);
+const mdTarget = new Element();
+mdTarget.closest = (selector) => selector === "button" ? mdButton : null;
+let mdPrevented = false;
+let mdStopped = false;
+const mdEvent = {
+  target: mdTarget, button: 0, defaultPrevented: false,
+  metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+  preventDefault() { mdPrevented = true; },
+  stopPropagation() { mdStopped = true; },
+};
+assert.ok(docListeners.click.length >= 1, "apply() 应安装 Markdown 图片点击捕获监听");
+docListeners.click.slice(-1)[0](mdEvent);
+assert.ok(standaloneRender !== null, "点击 Markdown 图片应挂载插件 Lightbox");
+assert.ok(mdPrevented && mdStopped, "接管后应阻止官方按钮的默认点击行为");
+assert.equal(standaloneRender.element.props.startId, "markdown:blob:fake/md.png", "Lightbox 应以被点击图片为起点");
+assert.ok(document.body.children.includes(standaloneRender.host), "独立 Lightbox host 应挂到 body");
+const mdHost = standaloneRender.host;
+standaloneRender.element.props.onClose();
+assert.equal(standaloneRender, null, "关闭时应卸载独立 React root");
+assert.ok(!document.body.children.includes(mdHost), "关闭时应移除 Lightbox host");
+console.log("✅ 3/3f 最终输出 Markdown 图片通过（捕获阶段拦截 + 独立 Lightbox + 关闭清理）");
+
+// ── 3g) present 交付图片：整卡点击接管 + 三处文件操作 ───────────────────
+// 交付卡片本身没有 <img>，整卡按钮的 title 是 Host 绝对路径；只接管图片
+// 扩展名，STL / Markdown 仍走官方 Sidebar。
+const presentedPath = "/tmp/preview_hero.png";
+const presentedButton = {
+  getAttribute(name) { return name === "title" ? presentedPath : null; },
+  contains() { return true; },
+};
+const presentedCard = {
+  querySelector(selector) { return selector === ":scope > button[title]" ? presentedButton : null; },
+};
+presentedCards.push(presentedCard);
+const presentedTarget = new Element();
+presentedTarget.closest = (selector) => selector === "[data-presented-file]" ? presentedCard : null;
+let presentedPrevented = false;
+let presentedStopped = false;
+const presentedEvent = {
+  target: presentedTarget, button: 0, defaultPrevented: false,
+  metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+  preventDefault() { presentedPrevented = true; },
+  stopPropagation() { presentedStopped = true; },
+};
+assert.ok(docListeners.click.length >= 2, "apply() 应同时安装交付卡片与 Markdown 的捕获监听");
+docListeners.click[0](presentedEvent);
+assert.ok(standaloneRender !== null, "点击 present 图片卡片应打开插件 Lightbox");
+assert.ok(presentedPrevented && presentedStopped, "接管后应阻止官方 Sidebar 预览");
+assert.equal(standaloneRender.element.props.startId, `file:${presentedPath}`, "Lightbox 应以被点击的交付图片为起点");
+assert.ok(standaloneRender.element.props.more !== undefined, "交付图片 Lightbox 应提供三处文件操作");
+const fileMore = standaloneRender.element.props.more;
+assert.equal(fileMore.pathFor(`file:${presentedPath}`), presentedPath, "更多操作应解析出文件路径");
+assert.ok((await fileMore.apps(presentedPath)).some((app) => app.id === "preview"), "应能读取关联应用列表");
+await fileMore.open(presentedPath);
+assert.deepEqual(openRequests.at(-1), { path: presentedPath }, "默认打开应走 Session Remote");
+await fileMore.reveal(presentedPath);
+assert.deepEqual(openRequests.at(-1), { path: presentedPath, action: "reveal" }, "显示位置应走 Session Remote 的 reveal");
+assert.equal((await fileMore.sidebar(presentedPath)).ok, true, "在侧栏打开应成功");
+assert.ok(sidebarAddresses.at(-1).startsWith("dsh-resource://file/session/session-ui/"), "侧栏应使用会话文件地址");
+assert.ok(sidebarAddresses.at(-1).endsWith("preview_hero.png"), `侧栏地址应保留图片路径，实际=${sidebarAddresses.at(-1)}`);
+standaloneRender.element.props.onClose();
+assert.equal(standaloneRender, null, "关闭交付图片 Lightbox 时应卸载 root");
+console.log("✅ 3/3g 交付图片通过（整卡点击 + 默认应用 / 关联应用 / 侧栏 / 定位）");
 
 console.log("\n✅ dsh-image-preview self-check passed (3/3)");

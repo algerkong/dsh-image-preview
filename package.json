@@ -1,7 +1,7 @@
 {
   "name": "@alger-ai/dsh-image-preview",
-  "description": "Image preview in the dsh session: read_image results render as a thumbnail and open a full-size lightbox with zoom, rotate, pan, download, and cross-row navigation",
-  "version": "0.5.0",
+  "description": "Image preview in the dsh session: read_image, user-sent, assistant/Markdown/present images, and a full-size lightbox with zoom, rotate, pan, download, file actions, and cross-image navigation",
+  "version": "0.6.5",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
@@ -24,6 +24,13 @@
     "test": "node verify.mjs"
   },
   "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.5-rc.2 <0.3.0-0"
+  },
+  "devDependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "react": ">=18"
